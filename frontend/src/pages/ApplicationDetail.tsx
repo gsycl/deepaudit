@@ -176,10 +176,30 @@ export default function ApplicationDetail() {
               <button
                 onClick={() => reanalyzeMutation.mutate()}
                 disabled={reanalyzeMutation.isPending}
-                className="flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                className={`flex items-center gap-1.5 text-xs font-medium transition-all ${
+                  reanalyzeMutation.isPending
+                    ? 'text-orange-500 cursor-not-allowed'
+                    : reanalyzeMutation.isSuccess
+                    ? 'text-green-600'
+                    : 'text-blue-600 hover:text-blue-800'
+                }`}
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${reanalyzeMutation.isPending ? 'animate-spin' : ''}`} />
-                {reanalyzeMutation.isPending ? 'Analyzing...' : 'Re-analyze'}
+                {reanalyzeMutation.isPending ? (
+                  <>
+                    <span className="text-base leading-none animate-bounce">🔍</span>
+                    <span>Analyzing<span className="animate-pulse">…</span></span>
+                  </>
+                ) : reanalyzeMutation.isSuccess ? (
+                  <>
+                    <span className="text-base leading-none">✅</span>
+                    <span>Done!</span>
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Re-analyze</span>
+                  </>
+                )}
               </button>
             </div>
             <div className="flex items-center gap-4">
@@ -208,10 +228,16 @@ export default function ApplicationDetail() {
             </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="bg-white rounded-xl border border-gray-200 p-5 relative">
             <h3 className="text-sm font-semibold text-gray-700 mb-3">
               Fraud Signals ({app.fraud_signals.length})
             </h3>
+            {reanalyzeMutation.isPending && (
+              <div className="absolute inset-0 bg-white/80 rounded-xl flex flex-col items-center justify-center gap-2 z-10">
+                <span className="text-3xl animate-spin">🔍</span>
+                <p className="text-sm font-medium text-orange-600 animate-pulse">Re-analyzing signals…</p>
+              </div>
+            )}
             {app.fraud_signals.length === 0 ? (
               <p className="text-sm text-gray-400 text-center py-4">No fraud signals detected.</p>
             ) : (
