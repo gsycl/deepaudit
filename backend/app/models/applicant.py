@@ -9,7 +9,7 @@ class Applicant(Base):
     __tablename__ = "applicants"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    ssn_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    ssn_hash: Mapped[str] = mapped_column(String(64), index=True)
     first_name: Mapped[str] = mapped_column(String(100))
     last_name: Mapped[str] = mapped_column(String(100))
     dob: Mapped[date] = mapped_column(Date)

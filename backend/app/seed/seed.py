@@ -1,9 +1,8 @@
 """
-Seed script: populates the database with realistic unemployment fraud scenarios.
+Seed script: populates the database with 100+ realistic unemployment fraud scenarios.
 Run: python -m app.seed.seed
 """
 import asyncio
-import hashlib
 import sys
 import os
 from datetime import datetime, timedelta, date
@@ -17,50 +16,58 @@ from sqlalchemy.orm import Session
 from app.database import engine, Base, SessionLocal
 from app.models import (
     Applicant, Address, Application, ApplicationStatus, ProgramType,
-    EmploymentHistory, WeeklyCertification, FinancialRecord,
-    FraudSignal, HouseholdMember,
+    EmploymentHistory, WeeklyCertification, FinancialRecord, HouseholdMember,
 )
 from app.models.metadata import SubmissionMetadata
 from app.services.fraud_engine import run_fraud_analysis
 from app.services.claude_service import get_ai_recommendation, apply_ai_result_to_application
 from app.seed.patterns import (
-    PATTERN_A, PATTERN_B, PATTERN_C, PATTERN_D,
-    FRAUD_RING_SUBMITTED_AT, FRAUD_RING_IP_HASH, FRAUD_RING_DEVICE_FP,
-    DEVICE_CLUSTER_FP, DEVICE_CLUSTER_IP_HASH,
     sha256,
+    PATTERN_A, FRAUD_RING_A_AT, FRAUD_RING_A_IP, FRAUD_RING_A_DEVICE,
+    PATTERN_B,
+    PATTERN_C, DEVICE_CLUSTER_FP, DEVICE_CLUSTER_IP,
+    PATTERN_D,
+    PATTERN_E, FRAUD_RING_E_AT, FRAUD_RING_E_IP, FRAUD_RING_E_DEVICE,
+    PATTERN_F,
+    PATTERN_G, BOTFARM_AT, BOTFARM_IP, BOTFARM_DEVICE,
+    PATTERN_H, EMPLOYER_COLLUSION_AT,
+    PATTERN_I,
+    PATTERN_J,
 )
 
 fake = Faker()
 Faker.seed(42)
 
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def days_ago(n: int) -> datetime:
     return datetime.utcnow() - timedelta(days=n)
 
 
-def date_from_days_ago(n: int) -> date:
+def date_ago(n: int) -> date:
     return (datetime.utcnow() - timedelta(days=n)).date()
 
 
-def make_cert_weeks(application_id, n_weeks=8, contacts=None, out_state=None):
+def make_certs(application_id, n_weeks=8, contacts=None, out_state=None, home_state="IL"):
     certs = []
     for i in range(n_weeks):
-        week_start = date_from_days_ago((n_weeks - i) * 7)
-        submitted_ip = None
+        week_start = date_ago((n_weeks - i) * 7)
         if out_state:
-            submitted_ip = f"{out_state}.{fake.random_int(1, 254)}.{fake.random_int(1, 254)}.{fake.random_int(1, 254)}"
+            ip = f"{out_state}.{fake.random_int(1,254)}.{fake.random_int(1,254)}.{fake.random_int(1,254)}"
+        else:
+            ip = f"{home_state}.{fake.random_int(1,254)}.{fake.random_int(1,254)}.{fake.random_int(1,254)}"
         certs.append(WeeklyCertification(
             application_id=application_id,
             week_start=week_start,
             did_work=False,
             reported_earnings=Decimal("0.00"),
-            job_search_contacts=contacts if contacts is not None else fake.random_int(1, 5),
-            submitted_ip=submitted_ip or f"IL.{fake.random_int(1, 254)}.{fake.random_int(1, 254)}.{fake.random_int(1, 254)}",
+            job_search_contacts=contacts if contacts is not None else fake.random_int(1, 7),
+            submitted_ip=ip,
         ))
     return certs
 
 
-def create_applicant_with_address(db: Session, data: dict) -> Applicant:
+def make_applicant(db: Session, data: dict) -> Applicant:
     applicant = Applicant(
         ssn_hash=data["ssn_hash"],
         first_name=data["first_name"],
@@ -73,58 +80,57 @@ def create_applicant_with_address(db: Session, data: dict) -> Applicant:
     db.add(applicant)
     db.flush()
 
-    addr_data = data.get("address", {
+    addr = data.get("address") or {
         "street": fake.street_address(),
         "city": fake.city(),
-        "state": data.get("state", fake.state_abbr()),
+        "state": data.get("state", "IL"),
         "zip_code": fake.zipcode(),
-        "lat": float(fake.latitude()),
-        "lon": float(fake.longitude()),
-    })
-
-    address = Address(
+    }
+    db.add(Address(
         applicant_id=applicant.id,
-        street=addr_data["street"],
-        city=addr_data["city"],
-        state=addr_data["state"],
-        zip_code=addr_data["zip_code"],
-        lat=addr_data.get("lat"),
-        lon=addr_data.get("lon"),
+        street=addr["street"], city=addr["city"],
+        state=addr["state"], zip_code=addr["zip_code"],
+        lat=addr.get("lat"), lon=addr.get("lon"),
         is_primary=True,
-    )
-    db.add(address)
-
-    financial = FinancialRecord(
+    ))
+    db.add(FinancialRecord(
         applicant_id=applicant.id,
         bank_account_hash=data["bank_account_hash"],
         institution_name=fake.company() + " Bank",
         account_type="checking",
         monthly_income_reported=Decimal(str(data.get("monthly_income", 3000))),
-    )
-    db.add(financial)
+    ))
     db.flush()
     return applicant
 
 
-def create_application(db: Session, applicant: Application, emp_data: dict,
-                        weekly_benefit: float, submitted_at: datetime,
-                        device_fp: str = None, ip_hash: str = None,
-                        cert_contacts: int = None, out_state: str = None) -> Application:
-    state = applicant.addresses[0].state if applicant.addresses else "IL"
+def make_application(
+    db: Session,
+    applicant: Applicant,
+    emp_data: dict,
+    weekly_benefit: float,
+    submitted_at: datetime,
+    device_fp: str = None,
+    ip_hash: str = None,
+    cert_contacts: int = None,
+    out_state: str = None,
+    status: ApplicationStatus = ApplicationStatus.PENDING,
+) -> Application:
+    home_state = applicant.addresses[0].state if applicant.addresses else "IL"
 
     app = Application(
         applicant_id=applicant.id,
         program_type=ProgramType.UNEMPLOYMENT,
-        status=ApplicationStatus.PENDING,
+        status=status,
         submitted_at=submitted_at,
         weekly_benefit_amount=Decimal(str(weekly_benefit)),
-        claim_start_date=date_from_days_ago(90),
-        claim_end_date=date_from_days_ago(0),
+        claim_start_date=date_ago(90),
+        claim_end_date=date_ago(0),
     )
     db.add(app)
     db.flush()
 
-    emp = EmploymentHistory(
+    db.add(EmploymentHistory(
         application_id=app.id,
         employer_name=emp_data["employer_name"],
         employer_ein_hash=emp_data.get("employer_ein_hash"),
@@ -133,153 +139,96 @@ def create_application(db: Session, applicant: Application, emp_data: dict,
         separation_reason=emp_data["separation_reason"],
         reported_salary=Decimal(str(emp_data.get("reported_salary", 40000))),
         is_verified=False,
-    )
-    db.add(emp)
+    ))
 
-    certs = make_cert_weeks(app.id, n_weeks=8, contacts=cert_contacts, out_state=out_state)
-    db.add_all(certs)
+    db.add_all(make_certs(app.id, contacts=cert_contacts, out_state=out_state, home_state=home_state))
 
-    meta = SubmissionMetadata(
+    db.add(SubmissionMetadata(
         application_id=app.id,
         ip_address=f"10.0.0.{fake.random_int(1, 254)}",
         ip_hash=ip_hash or sha256(f"ip_{fake.ipv4()}_{app.id}"),
         device_fingerprint=device_fp or sha256(f"fp_{fake.uuid4()}"),
         user_agent=fake.user_agent(),
-        time_to_complete_seconds=fake.random_int(120, 900),
+        time_to_complete_seconds=fake.random_int(90, 900),
         submitted_at=submitted_at,
-    )
-    db.add(meta)
+    ))
     db.flush()
     return app
 
 
-def seed_clean_applicants(db: Session, count: int = 35) -> list:
+# ── pattern seeders ───────────────────────────────────────────────────────────
+
+def seed_clean(db: Session, count: int = 65) -> list:
     apps = []
-    for _ in range(count):
+    statuses = [ApplicationStatus.PENDING] * 40 + [ApplicationStatus.APPROVED] * 15 + [ApplicationStatus.DENIED] * 10
+    for i in range(count):
         state = fake.state_abbr()
-        applicant_data = {
-            "first_name": fake.first_name(),
-            "last_name": fake.last_name(),
+        applicant = make_applicant(db, {
+            "first_name": fake.first_name(), "last_name": fake.last_name(),
             "dob": fake.date_of_birth(minimum_age=22, maximum_age=62),
             "ssn_hash": sha256(f"clean_ssn_{fake.ssn()}_{fake.uuid4()}"),
-            "phone": fake.phone_number(),
-            "email": fake.email(),
+            "phone": fake.phone_number(), "email": fake.email(),
             "bank_account_hash": sha256(f"clean_bank_{fake.bban()}_{fake.uuid4()}"),
-            "monthly_income": fake.random_int(2000, 5000),
+            "monthly_income": fake.random_int(1800, 5500),
             "state": state,
-        }
-        applicant = create_applicant_with_address(db, applicant_data)
-
-        emp_data = {
+        })
+        emp = {
             "employer_name": fake.company(),
             "employer_ein_hash": sha256(f"ein_{fake.ein()}"),
             "start_date": fake.date_between(start_date="-5y", end_date="-6m"),
-            "end_date": date_from_days_ago(fake.random_int(30, 90)),
-            "separation_reason": fake.random_element(["laid_off", "quit"]),
-            "reported_salary": fake.random_int(30000, 65000),
+            "end_date": date_ago(fake.random_int(15, 120)),
+            "separation_reason": fake.random_element(["laid_off", "laid_off", "quit"]),
+            "reported_salary": fake.random_int(28000, 70000),
         }
-
-        app = create_application(
-            db, applicant, emp_data,
-            weekly_benefit=fake.random_int(200, 400),
-            submitted_at=days_ago(fake.random_int(1, 30)),
+        app = make_application(
+            db, applicant, emp,
+            weekly_benefit=fake.random_int(180, 450),
+            submitted_at=days_ago(fake.random_int(1, 60)),
             cert_contacts=fake.random_int(1, 7),
+            status=statuses[i % len(statuses)],
         )
         apps.append(app)
-
     db.commit()
-    print(f"  Created {count} clean applicants")
+    print(f"  ✓ Clean applicants: {count}")
     return apps
 
 
-def seed_pattern_a(db: Session) -> list:
+def seed_pattern(db: Session, pattern: dict, base_time: datetime = None,
+                 base_ip: str = None, base_device: str = None,
+                 out_state: str = None, label: str = "") -> list:
     apps = []
-    for member in PATTERN_A["members"]:
-        applicant = create_applicant_with_address(db, member)
-        offset = member["submitted_offset_seconds"]
-        submitted_at = FRAUD_RING_SUBMITTED_AT + timedelta(seconds=offset)
+    members = pattern.get("members", [pattern.get("member")])
+    base_time = base_time or days_ago(fake.random_int(2, 14))
 
-        app = create_application(
-            db, applicant, member["employment"],
+    for member in members:
+        applicant = make_applicant(db, member)
+        offset = member.get("submitted_offset_seconds", 0)
+        app = make_application(
+            db, applicant,
+            emp_data=member["employment"],
             weekly_benefit=member["weekly_benefit"],
-            submitted_at=submitted_at,
-            device_fp=FRAUD_RING_DEVICE_FP,
-            ip_hash=FRAUD_RING_IP_HASH,
+            submitted_at=base_time + timedelta(seconds=offset),
+            device_fp=member.get("device_fingerprint") or base_device,
+            ip_hash=member.get("ip_hash") or base_ip,
+            cert_contacts=member.get("cert_contacts"),
+            out_state=member.get("out_state") or out_state,
         )
         apps.append(app)
-
     db.commit()
-    print(f"  Created Pattern A (Fraud Ring): {len(apps)} applications")
+    print(f"  ✓ {label or pattern['name']}: {len(apps)} applications")
     return apps
 
 
-def seed_pattern_b(db: Session) -> list:
-    apps = []
-    for member in PATTERN_B["members"]:
-        applicant = create_applicant_with_address(db, member)
-        app = create_application(
-            db, applicant, member["employment"],
-            weekly_benefit=member["weekly_benefit"],
-            submitted_at=days_ago(fake.random_int(5, 15)),
-            cert_contacts=member["cert_contacts"],
-        )
-        apps.append(app)
+# ── AI analysis ───────────────────────────────────────────────────────────────
 
-    db.commit()
-    print(f"  Created Pattern B (Income Misreporting): {len(apps)} applications")
-    return apps
-
-
-def seed_pattern_c(db: Session) -> list:
-    apps = []
-    for member in PATTERN_C["members"]:
-        state = member["state"]
-        member["address"] = {
-            "street": fake.street_address(),
-            "city": fake.city(),
-            "state": state,
-            "zip_code": fake.zipcode(),
-        }
-        applicant = create_applicant_with_address(db, member)
-        app = create_application(
-            db, applicant, member["employment"],
-            weekly_benefit=member["weekly_benefit"],
-            submitted_at=days_ago(fake.random_int(2, 10)),
-            device_fp=DEVICE_CLUSTER_FP,
-            ip_hash=DEVICE_CLUSTER_IP_HASH,
-            out_state="TX",  # Certs submitted from TX regardless of home state
-        )
-        apps.append(app)
-
-    db.commit()
-    print(f"  Created Pattern C (Device Cluster): {len(apps)} applications")
-    return apps
-
-
-def seed_pattern_d(db: Session) -> list:
-    member = PATTERN_D["member"]
-    applicant = create_applicant_with_address(db, member)
-    app = create_application(
-        db, applicant, member["employment"],
-        weekly_benefit=member["weekly_benefit"],
-        submitted_at=days_ago(2),
-        device_fp=member["device_fingerprint"],
-        ip_hash=DEVICE_CLUSTER_IP_HASH,
-    )
-    db.commit()
-    print(f"  Created Pattern D (Deceased Applicant): 1 application")
-    return [app]
-
-
-async def run_ai_on_high_risk(db: Session, all_apps: list):
+async def run_ai(db: Session, all_apps: list):
     from sqlalchemy.orm import selectinload
     from sqlalchemy import select
-    from app.models import Application, Applicant
 
-    high_risk_ids = [a.id for a in all_apps if (a.risk_score or 0) > 30]
-    print(f"\n  Running Claude AI analysis on {len(high_risk_ids)} high-risk applications...")
+    high_risk = [a.id for a in all_apps if (a.risk_score or 0) > 25]
+    print(f"\n  Running mock AI analysis on {len(high_risk)} applications (risk > 25)...")
 
-    for app_id in high_risk_ids:
+    for app_id in high_risk:
         try:
             app = db.execute(
                 select(Application)
@@ -291,58 +240,90 @@ async def run_ai_on_high_risk(db: Session, all_apps: list):
                 )
                 .where(Application.id == app_id)
             ).scalar_one()
-
             result = await get_ai_recommendation(app, app.fraud_signals, app.applicant)
             apply_ai_result_to_application(app, result)
             db.commit()
-            print(f"    ✓ {app.id} → {result.get('recommendation', 'N/A')}")
         except Exception as e:
             print(f"    ✗ {app_id}: {e}")
 
+    print(f"  ✓ AI analysis complete")
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
 
 async def main():
-    print("DeepAudit Seed Script")
+    print("DeepAudit Seed Script — Extended")
     print("=" * 50)
 
     print("\nDropping and recreating all tables...")
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    print("  Tables created.")
+    print("  Tables ready.")
 
     db = SessionLocal()
     all_apps = []
 
     try:
-        print("\nSeeding data...")
-        all_apps.extend(seed_clean_applicants(db, count=35))
-        all_apps.extend(seed_pattern_a(db))
-        all_apps.extend(seed_pattern_b(db))
-        all_apps.extend(seed_pattern_c(db))
-        all_apps.extend(seed_pattern_d(db))
+        print("\nSeeding patterns...")
 
-        print(f"\nRunning fraud analysis on {len(all_apps)} applications...")
+        # Control group — clean applicants (mix of pending/approved/denied)
+        all_apps += seed_clean(db, count=65)
+
+        # A: Fraud ring — shared bank + address + device + bulk timing + still employed
+        all_apps += seed_pattern(db, PATTERN_A, base_time=FRAUD_RING_A_AT, base_ip=FRAUD_RING_A_IP, base_device=FRAUD_RING_A_DEVICE, label="Pattern A — Fraud Ring Alpha")
+
+        # B: Income misreporting — high monthly income vs zero-earnings certifications + fake job search
+        all_apps += seed_pattern(db, PATTERN_B, label="Pattern B — Income Misreporting")
+
+        # C: Device/IP cluster — same device + IP, 5 states, out-of-state certs
+        all_apps += seed_pattern(db, PATTERN_C, base_device=DEVICE_CLUSTER_FP, base_ip=DEVICE_CLUSTER_IP, out_state="TX", label="Pattern C — Device/IP Cluster")
+
+        # D: Deceased applicants
+        all_apps += seed_pattern(db, PATTERN_D, label="Pattern D — Deceased Applicants")
+
+        # E: Second fraud ring — different shared bank + address + still employed
+        all_apps += seed_pattern(db, PATTERN_E, base_time=FRAUD_RING_E_AT, base_ip=FRAUD_RING_E_IP, base_device=FRAUD_RING_E_DEVICE, label="Pattern E — Fraud Ring Beta")
+
+        # F: Duplicate SSN — identity theft, two applicants same SSN
+        all_apps += seed_pattern(db, PATTERN_F, label="Pattern F — Duplicate SSN (Identity Theft)")
+
+        # G: Bot farm — 8 people, same device + IP, all within 88 seconds
+        all_apps += seed_pattern(db, PATTERN_G, base_time=BOTFARM_AT, base_ip=BOTFARM_IP, base_device=BOTFARM_DEVICE, label="Pattern G — Bot Farm Bulk Submission")
+
+        # H: Employer collusion — 6 people same EIN, all claim layoff same week, still employed
+        all_apps += seed_pattern(db, PATTERN_H, base_time=EMPLOYER_COLLUSION_AT, label="Pattern H — Employer Collusion")
+
+        # I: Out-of-state seasonal claimants — IL registered, certifying from FL
+        all_apps += seed_pattern(db, PATTERN_I, out_state="FL", label="Pattern I — Out-of-State Seasonal")
+
+        # J: Working while claiming — high income + zero-earnings certs + uniform job search
+        all_apps += seed_pattern(db, PATTERN_J, label="Pattern J — Working While Claiming")
+
+        # Run fraud engine on every application
+        print(f"\nRunning fraud engine on {len(all_apps)} applications...")
         for app in all_apps:
-            risk_score, signals = run_fraud_analysis(app.id, db)
+            risk_score, _ = run_fraud_analysis(app.id, db)
             app.risk_score = risk_score
-
         db.commit()
-        print("  Fraud analysis complete.")
+        print("  ✓ Fraud engine complete.")
 
-        high_risk = [a for a in all_apps if (a.risk_score or 0) > 30]
-        print(f"\n  Risk score summary:")
-        print(f"    High risk (>70):   {sum(1 for a in all_apps if (a.risk_score or 0) > 70)}")
-        print(f"    Medium risk (30-70): {sum(1 for a in all_apps if 30 < (a.risk_score or 0) <= 70)}")
-        print(f"    Low risk (<30):    {sum(1 for a in all_apps if (a.risk_score or 0) <= 30)}")
+        # Risk summary
+        buckets = [(">80", 80), ("61-80", 60), ("31-60", 30), ("≤30", -1)]
+        print("\n  Risk distribution:")
+        print(f"    Critical  (>80):  {sum(1 for a in all_apps if (a.risk_score or 0) > 80)}")
+        print(f"    High    (61-80):  {sum(1 for a in all_apps if 60 < (a.risk_score or 0) <= 80)}")
+        print(f"    Medium  (31-60):  {sum(1 for a in all_apps if 30 < (a.risk_score or 0) <= 60)}")
+        print(f"    Low       (≤30):  {sum(1 for a in all_apps if (a.risk_score or 0) <= 30)}")
 
-        await run_ai_on_high_risk(db, all_apps)
+        await run_ai(db, all_apps)
 
     finally:
         db.close()
 
     print("\n" + "=" * 50)
-    print(f"Seed complete! Total applications: {len(all_apps)}")
-    print("Start the server: uvicorn app.main:app --reload")
-    print("View API docs:    http://localhost:8000/docs")
+    print(f"Done! Total applications seeded: {len(all_apps)}")
+    print("API docs: http://localhost:8000/docs")
+    print("Frontend: http://localhost:5173")
 
 
 if __name__ == "__main__":
