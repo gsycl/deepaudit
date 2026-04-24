@@ -60,3 +60,14 @@ export const fetchHealth = async (): Promise<{ status: string }> => {
   const { data } = await api.get('/health')
   return data
 }
+
+export interface StatsData {
+  total: number
+  risk_buckets: { label: string; count: number }[]
+  status_counts: { status: string; count: number }[]
+}
+
+export const fetchStats = async (): Promise<StatsData> => {
+  const { data } = await api.get('/applications/stats')
+  return data
+}

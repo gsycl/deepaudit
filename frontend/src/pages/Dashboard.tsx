@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { AlertTriangle, ChevronRight, RefreshCw } from 'lucide-react'
 import { useApplications } from '../hooks/useApplications'
+import { useStats } from '../hooks/useStats'
 import RiskBadge from '../components/RiskBadge'
 import StatusBadge from '../components/StatusBadge'
 import type { ApplicationStatus, ProgramType } from '../types'
@@ -56,20 +57,18 @@ export default function Dashboard() {
     )
   }
 
+  const { data: stats } = useStats()
   const items = data?.items ?? []
 
-  const riskBucketData = RISK_BUCKETS.map((b) => ({
-    ...b,
-    count: items.filter((a) => {
-      const s = a.risk_score ?? 0
-      return s >= b.min && s <= b.max
-    }).length,
-  }))
+  const riskBucketData = (stats?.risk_buckets ?? RISK_BUCKETS.map(b => ({ label: b.label, count: 0 }))).map((b) => {
+    const fill = RISK_BUCKETS.find(r => r.label === b.label)?.fill ?? '#94a3b8'
+    return { ...b, fill }
+  })
 
-  const statusCounts = STATUS_OPTIONS.map((s) => ({
-    name: s.replace('_', ' '),
-    value: items.filter((a) => a.status === s).length,
-    fill: PIE_COLORS[s],
+  const statusCounts = (stats?.status_counts ?? []).map((s) => ({
+    name: s.status.replace('_', ' '),
+    value: s.count,
+    fill: PIE_COLORS[s.status as ApplicationStatus] ?? '#94a3b8',
   })).filter((x) => x.value > 0)
 
   return (
@@ -78,7 +77,7 @@ export default function Dashboard() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Applications Queue</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            {data?.total ?? 0} total applications — sorted by risk score
+            {stats?.total ?? data?.total ?? 0} total applications — sorted by risk score
           </p>
         </div>
         <button

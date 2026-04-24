@@ -21,6 +21,31 @@ from ..services.claude_service import get_ai_recommendation, apply_ai_result_to_
 router = APIRouter()
 
 
+@router.get("/stats")
+def get_stats(db: Session = Depends(get_db)):
+    rows = db.execute(select(Application.risk_score, Application.status)).all()
+    risk_buckets = {"0-20": 0, "21-40": 0, "41-60": 0, "61-80": 0, "81-100": 0}
+    status_counts: dict[str, int] = {}
+    for risk_score, status in rows:
+        s = risk_score or 0
+        if s <= 20:
+            risk_buckets["0-20"] += 1
+        elif s <= 40:
+            risk_buckets["21-40"] += 1
+        elif s <= 60:
+            risk_buckets["41-60"] += 1
+        elif s <= 80:
+            risk_buckets["61-80"] += 1
+        else:
+            risk_buckets["81-100"] += 1
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "total": len(rows),
+        "risk_buckets": [{"label": k, "count": v} for k, v in risk_buckets.items()],
+        "status_counts": [{"status": k, "count": v} for k, v in status_counts.items()],
+    }
+
+
 @router.get("", response_model=PaginatedApplicationList)
 def list_applications(
     status: Optional[str] = None,
